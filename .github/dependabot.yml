@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # Actions float on major tags; this is how a deprecation surfaces before it breaks.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

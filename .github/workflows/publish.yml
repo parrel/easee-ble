@@ -1,0 +1,46 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+
+      # A wrong version cannot be un-published, so refuse before uploading.
+      - name: Tag must match __version__
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          built=$(ls dist/*.tar.gz | sed -E 's/.*easee_ble-(.*)\.tar\.gz/\1/')
+          if [ "$tag" != "$built" ]; then
+            echo "tag $GITHUB_REF_NAME does not match __version__ $built" >&2
+            exit 1
+          fi
+
+      - run: twine check dist/*
+
+      # A clean venv under /tmp, so a module missing from the wheel is not masked by the tree.
+      - name: Smoke-test the wheel
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/python -c "import easee_ble; print(easee_ble.__version__)"
+          cd /tmp && /tmp/smoke/bin/python -c "import easee_ble.client, easee_ble.session"
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true

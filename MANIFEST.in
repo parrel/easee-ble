@@ -1,0 +1,5 @@
+# The sdist ships the tests, so include the data they need - without this,
+# `pytest` against an unpacked sdist fails on a missing vector file.
+recursive-include tests *.json
+
+include CHANGELOG.md

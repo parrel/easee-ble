@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "easee-ble"
+dynamic = ["version"]
+description = "Local Bluetooth control for Easee EV chargers"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "parrel" }]
+keywords = ["easee", "ev", "charger", "bluetooth", "ble", "home-assistant"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Framework :: AsyncIO",
+  "Topic :: Home Automation",
+]
+dependencies = [
+  # A 4-byte GCM nonce is legal but `cryptography` refuses any IV under 8
+  # bytes, so this cannot be swapped for it. See easee_ble/crypto.py.
+  "pycryptodome>=3.20",
+  # EC-JPAKE needs raw P-256 point arithmetic, which `cryptography` does not
+  # expose. Note ecdsa's own README: it is not side-channel hardened.
+  "ecdsa>=0.19",
+  "bleak>=0.22",
+  "bleak-retry-connector>=3.5.0",
+]
+
+[project.urls]
+Repository = "https://github.com/parrel/easee-ble"
+"Bug Tracker" = "https://github.com/parrel/easee-ble/issues"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "pytest-cov>=5",
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "easee_ble.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+easee_ble = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The client tests are async; without this every one of them needs a decorator.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+# `py.typed` promises callers that these annotations are checked, so check them.
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+packages = ["easee_ble"]
+strict = true
+# The library is annotated; its dependencies are not all shipped with types.
+[[tool.mypy.overrides]]
+module = ["Crypto.*", "ecdsa.*", "bleak_retry_connector.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+# Pinned explicitly rather than left to ruff's defaults, which shift between
+# releases - CI should not start failing because a new ruff was published.
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  # __all__ is grouped by role, with comments. Alphabetising it would destroy
+  # the only structure it has.
+  "RUF022",
+]
