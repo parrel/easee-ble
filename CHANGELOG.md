@@ -2,7 +2,7 @@
 
 Notable changes per release. Versions follow [SemVer](https://semver.org).
 
-## Unreleased
+## 0.1.1 - 2026-09-09
 
 ### Fixed
 

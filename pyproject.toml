@@ -56,6 +56,8 @@ easee_ble = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Test this tree, never an easee-ble that happens to be installed alongside it.
+pythonpath = ["src"]
 # The client tests are async; without this every one of them needs a decorator.
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
