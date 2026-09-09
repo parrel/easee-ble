@@ -274,3 +274,23 @@ async def test_disconnect_survives_a_backend_that_hangs(charger, monkeypatch):
     monkeypatch.setattr(client_module, "DISCONNECT_TIMEOUT", 0.05)
     await link.disconnect()
     assert link._client is None
+
+
+async def test_a_drop_mid_poll_fails_at_once_and_says_so(charger, monkeypatch):
+    link = await _connected()
+    charger.silent = True
+    monkeypatch.setattr(client_module, "REPLY_TIMEOUT", 30.0)
+
+    async def drop() -> None:
+        await asyncio.sleep(0.05)
+        charger.disconnected_callback(charger)
+
+    with pytest.raises(EaseeConnectionError, match="link dropped while waiting"):
+        await asyncio.gather(link.poll(), drop())
+
+
+async def test_polling_a_link_already_known_to_be_gone_is_refused(charger):
+    link = await _connected()
+    charger.disconnected_callback(charger)
+    with pytest.raises(EaseeConnectionError, match="reconnect first"):
+        await link.poll()

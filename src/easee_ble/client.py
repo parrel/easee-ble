@@ -86,6 +86,8 @@ class EaseeCharger:
         self._bonded = False
         # Set by the disconnect callback; the backend's belief can outlive the link.
         self._link_lost = False
+        # Wakes anything waiting on a reply, so a known drop is not waited out.
+        self._link_lost_event = asyncio.Event()
         # Unsubscribe callbacks from that path, released on disconnect.
         self._notify_cancels: list[Callable[[], None]] = []
         # Unnamed fields from the last poll, keyed "<CHANNEL>#<field number>".
@@ -101,6 +103,7 @@ class EaseeCharger:
         if self._link_lost:
             return
         self._link_lost = True
+        self._link_lost_event.set()
         _LOGGER.info("charger %s: the Bluetooth link dropped", self._serial)
         if self._on_disconnect is not None:
             # Never let a consumer's callback escape into bleak's disconnect path.
@@ -113,6 +116,7 @@ class EaseeCharger:
         """Connect, subscribe to notifications, and authenticate."""
         # use_services_cache skips a GATT rediscovery; pairing waits until the charger asks.
         self._link_lost = False
+        self._link_lost_event.clear()
         try:
             async with asyncio.timeout(LINK_TIMEOUT):
                 client = await establish_connection(
@@ -398,6 +402,10 @@ class EaseeCharger:
     async def _write_and_wait(self, request: Request) -> bytes:
         if self._client is None:
             raise EaseeConnectionError("not connected")
+        if self._link_lost:
+            raise EaseeConnectionError(
+                f"charger {self._serial}: the Bluetooth link dropped; reconnect first"
+            )
         if request.channel not in self._channels:
             # The write would succeed and the reply go nowhere: a bare REPLY_TIMEOUT.
             raise EaseeConnectionError(
@@ -428,7 +436,7 @@ class EaseeCharger:
 
         # The charger pushes a notification on the channel written to; there is no other path.
         try:
-            return await asyncio.wait_for(queue.get(), REPLY_TIMEOUT)
+            return await self._wait_for_reply(queue, request.channel)
         except TimeoutError as exc:
             raise EaseeConnectionError(
                 f"charger {self._serial}: wrote {len(request.data)} bytes to "
@@ -439,6 +447,29 @@ class EaseeCharger:
                 f"subscribed to out-of-band (see _subscribe_without_cccd); if "
                 f"that failed there is no path for a reply at all"
             ) from exc
+
+    async def _wait_for_reply(self, queue: asyncio.Queue[bytes], channel: Channel) -> bytes:
+        """Wait for the reply, giving up as soon as the link is known to be gone."""
+        reply = asyncio.ensure_future(queue.get())
+        dropped = asyncio.ensure_future(self._link_lost_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (reply, dropped),
+                timeout=REPLY_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # A reply that did arrive wins, even if the link died in the same pass.
+            if reply in done:
+                return reply.result()
+            if dropped in done:
+                raise EaseeConnectionError(
+                    f"charger {self._serial}: the Bluetooth link dropped while "
+                    f"waiting for a reply on {channel.name}"
+                )
+            raise TimeoutError
+        finally:
+            reply.cancel()
+            dropped.cancel()
 
     async def _authenticate(self) -> None:
         _LOGGER.info("charger %s: starting EC-JPAKE handshake", self._serial)
