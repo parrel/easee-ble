@@ -47,6 +47,69 @@ def charger_op_mode(code: int | None) -> ChargerOpMode | None:
         return None
 
 
+class LedMode(enum.IntEnum):
+    """State field 46: what the LED strip shows, the app's own enum in its own order."""
+
+    OFF = 0
+    STARTUP1_APPLICATION_STARTED = 1
+    STARTUP2_CHECKING_POWER_BOARD_FIRMWARE = 2
+    STARTUP3_CHECKING_LWN_FIRMWARE = 3
+    STARTUP4_CHECKING_WI_FI_FIRMWARE = 4
+    STARTUP5_FIRMWARE_UPGRADE_DONE = 5
+    STARTUP6 = 6
+    STARTUP7_SETUP_HALF_WAY_COMPLETED = 7
+    STARTUP8_SETUP_FULLY_COMPLETED = 8
+    OTA1 = 9
+    OTA2_UPGRADING_POWER_BOARD_FIRMWARE = 10
+    OTA3_UPGRADING_LWN_FIRMWARE = 11
+    OTA4_UPGRADING_WI_FI_FIRMWARE = 12
+    OTA5 = 13
+    OTA6 = 14
+    OTA7 = 15
+    ERROR = 16
+    ERROR_FOREVER = 17
+    IDLE_MASTER = 18
+    IDLE_SECONDARY_CONNECTED = 19
+    IDLE_SECONDARY_SEARCHING = 20
+    SMART_MODE_NOT_CHARGING = 21
+    SMART_MODE_CHARGING = 22
+    NORMAL_MODE_NOT_CHARGING = 23
+    NORMAL_MODE_CHARGING = 24
+    AWAITING_AUTHORIZATION = 25
+    VERIFY_AUTH_WITH_BACKEND = 26
+    EMPTY_BACKPLATE = 27
+    OK = 28
+    PAIRING_WITH_RFID = 29
+    SHUTDOWN5 = 30
+    SHUTDOWN4 = 31
+    SHUTDOWN3 = 32
+    SHUTDOWN2 = 33
+    SHUTDOWN1 = 34
+    SHUTDOWN0 = 35
+    SELF_TEST1 = 36
+    SELF_TEST2 = 37
+    SELF_TEST3 = 38
+    SELF_TEST4 = 39
+    SELF_TEST_PENDING_RFID_AND_TOUCH = 40
+    SELF_TEST_PENDING_RFID = 41
+    SELF_TEST_PENDING_TOUCH = 42
+    SELF_TEST_SUCCESS = 43
+    SELF_TEST_FAILED = 44
+    JINGLE_BELLS = 45
+    BLUETOOTH_CONNECTED = 46
+    INVALID_LOADBALANCING_CONFIG = 47
+
+
+def led_mode(code: int | None) -> LedMode | None:
+    """The :class:`LedMode` for a code, or ``None``; ``LedMode()`` raises."""
+    if code is None:
+        return None
+    try:
+        return LedMode(int(code))
+    except ValueError:
+        return None
+
+
 # State field 5, reasonForNoCurrent: why the charger is not delivering current.
 REASON_FOR_NO_CURRENT: dict[int, str] = {
     0: "OK, charging or ready to charge",
@@ -124,9 +187,6 @@ REASON_FOR_NO_CURRENT_SLUGS: dict[int, str] = {
     100: "undefined",
 }
 
-# Codes checked against the app's own wording; the rest are inherited, not verified.
-CONFIRMED_REASON_CODES: frozenset[int] = frozenset({25, 53, 55})
-
 
 def reason_for_no_current(code: int | None) -> str | None:
     """Describe a code, unmapped ones included; display text, so key on the slug."""
@@ -149,18 +209,24 @@ CONFIG_FIELDS: dict[int, str] = {
     # Whether the charger is switched on at all - Easee's `isEnabled`.
     1: "isEnabled",
     2: "maxChargerCurrent",
-    # Two three-phase current triples: command 50 writes 3/4/5, command 24 writes 8/9/10.
-    3: "circuitMaxCurrentP1",
-    4: "circuitMaxCurrentP2",
-    5: "circuitMaxCurrentP3",
-    8: "offlineMaxCircuitCurrentP1",
-    9: "offlineMaxCircuitCurrentP2",
-    10: "offlineMaxCircuitCurrentP3",
+    # The fallback limit without a network (command 21), shown capped at the fuse (command 50).
+    3: "fallbackCircuitCurrentP1",
+    4: "fallbackCircuitCurrentP2",
+    5: "fallbackCircuitCurrentP3",
+    8: "circuitMaxCurrentP1",
+    9: "circuitMaxCurrentP2",
+    10: "circuitMaxCurrentP3",
     # 1 = locked 1-phase, 2 = auto, 3 = locked 3-phase; the requested mode, not the one in use.
     7: "phaseMode",
     # The SSID the charger is configured to join - not the site name, and not proof it joined.
     11: "wifiSSID",
+    # 1 while idle current is on (command 34); absent when off.
+    12: "enableIdleCurrent",
     13: "ledStripBrightness",  # 0-100
+    # 1 while charging needs a key, the app's "private" access (command 33); absent when open.
+    14: "authorizationRequired",
+    # Present only while OCPP is on; went 1 -> absent the minute OCPP was switched off.
+    15: "ocppEnabled",
     # 1 while the cable is locked; absent means unlocked.
     18: "cableLocked",
     # Firmware version, as displayed by the app.
@@ -183,10 +249,18 @@ STATE_FIELDS: dict[int, str] = {
     22: "localRSSI",
     # Energy delivered in the current charging session, in kWh.
     19: "sessionEnergy",
+    # Energy delivered in the previous whole clock hour, in kWh; steps on the hour.
+    20: "energyPerHour",
     # Dynamic (temporary) charger current, in A.
     11: "dynamicChargerCurrent",
+    # Dynamic circuit limit per phase, in A (command 22); absent until set, cleared by a reboot.
+    14: "dynamicCircuitCurrentP1",
+    15: "dynamicCircuitCurrentP2",
+    16: "dynamicCircuitCurrentP3",
     # Easee's chargerOpMode; see ChargerOpMode.
     12: "chargerOpMode",
+    # What the LEDs show; see LedMode. Idle 18, self test 39, play_lights 46, absent when off.
+    46: "ledMode",
     # 25 is the neutral, 26/27/28 the phases. Note this unit charges on L3 when locked to one phase.
     25: "currentN",
     26: "currentL1",
@@ -195,9 +269,12 @@ STATE_FIELDS: dict[int, str] = {
     33: "voltageL1N",
     34: "voltageL2N",
     35: "voltageL3N",
+    # 36/37/38 are T3T4/T3T5/T4T5, and T3/T4/T5 are L1/L2/L3.
     36: "voltageL1L2",
-    37: "voltageL2L3",
-    38: "voltageL1L3",
+    37: "voltageL1L3",
+    38: "voltageL2L3",
+    # Hours since the charger was commissioned; ticks at the top of each clock hour.
+    4: "lifetimeHours",
     # Cable rating, in A.
     2: "cableRating",
     # The limit an Easee Equalizer imposes on this charger, one field per phase.
@@ -226,8 +303,14 @@ ZERO_WHEN_ABSENT: frozenset[str] = frozenset(
         "lifetimeEnergy",
         "reasonForNoCurrent",
         "sessionEnergy",
+        "energyPerHour",
         "isEnabled",
+        "ocppEnabled",
         "cableLocked",
+        "enableIdleCurrent",
+        "authorizationRequired",
+        # LedMode.OFF is 0, so an unlit charger drops the field.
+        "ledMode",
         # Pausing in the app writes a temporary limit of 0 A, so this field drops out.
         "dynamicChargerCurrent",
         # Listed for the same reason, though a 0 A maximum has never been observed.
@@ -239,6 +322,7 @@ ZERO_WHEN_ABSENT: frozenset[str] = frozenset(
 FIELD_UNITS: dict[str, str] = {
     "lifetimeEnergy": "kWh",
     "sessionEnergy": "kWh",
+    "energyPerHour": "kWh",
     "totalPower": "kW",
     "currentN": "A",
     "currentL1": "A",
@@ -256,14 +340,18 @@ FIELD_UNITS: dict[str, str] = {
     "circuitMaxCurrentP1": "A",
     "circuitMaxCurrentP2": "A",
     "circuitMaxCurrentP3": "A",
-    "offlineMaxCircuitCurrentP1": "A",
-    "offlineMaxCircuitCurrentP2": "A",
-    "offlineMaxCircuitCurrentP3": "A",
+    "fallbackCircuitCurrentP1": "A",
+    "fallbackCircuitCurrentP2": "A",
+    "fallbackCircuitCurrentP3": "A",
+    "dynamicCircuitCurrentP1": "A",
+    "dynamicCircuitCurrentP2": "A",
+    "dynamicCircuitCurrentP3": "A",
     "cableRating": "A",
     "equalizerLimitL1": "A",
     "equalizerLimitL2": "A",
     "equalizerLimitL3": "A",
     "ledStripBrightness": "%",
+    "lifetimeHours": "h",
 }
 
 # Keyed by `Frame.type`, which is None for a message type we do not recognise.
@@ -445,6 +533,12 @@ def parse_command_response(data: bytes) -> dict[str, Any]:
 def command_accepted(response: dict[str, Any]) -> bool:
     """Whether the charger accepted a command it replied to."""
     return response.get("code") == 1
+
+
+def wifi_networks(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """The networks a WiFi scan found, from its acknowledgement's ``res.networks``."""
+    networks = (response.get("res") or {}).get("networks")
+    return list(networks) if isinstance(networks, list) else []
 
 
 def command_payload(response: dict[str, Any]) -> Any | None:

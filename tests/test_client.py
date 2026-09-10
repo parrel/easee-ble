@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
+from bleak.exc import BleakError
 from test_frames import CONFIG_BEFORE, DEBUG_SAMPLE, STATE_CHARGING
 
 from easee_ble import client as client_module
@@ -58,11 +60,25 @@ class FakeCharger:
         self.silent = False
         self.refuse_until_bonded = False
         self.pair_result = True
+        # None: start_notify works. Else it fails on the missing CCCD, keeping the callback or not.
+        self.cccd_fails_keeping: bool | None = None
+        # Seconds before answering, by command id; and a reply to send before the real one.
+        self.delay: dict[int, float] = {}
+        self.stray: bytes | None = None
+        delegate = SimpleNamespace(_characteristic_notify_callbacks={})
+        self._backend = SimpleNamespace(_delegate=delegate)
 
     # -- bleak surface --------------------------------------------------------
 
     async def start_notify(self, char, callback) -> None:
-        self._notify[char.uuid] = (char, callback)
+        if self.cccd_fails_keeping is None:
+            self._notify[char.uuid] = (char, callback)
+            return
+        if self.cccd_fails_keeping:
+            # CoreBluetooth registers the callback before the CCCD write fails.
+            self._notify[char.uuid] = (char, callback)
+            self._backend._delegate._characteristic_notify_callbacks[char.handle] = callback
+        raise RuntimeError('CBATTErrorDomain Code=10 "The attribute could not be found."')
 
     async def pair(self) -> bool:
         self.paired = True
@@ -77,8 +93,19 @@ class FakeCharger:
         channel = Channel(char.uuid)
         self.requests.append((channel, bytes(data)))
         reply = self._reply(channel, bytes(data))
-        if reply is not None and not self.silent:
-            self._notify[char.uuid][1](char, bytearray(reply))
+        if reply is None or self.silent:
+            return
+        notify = self._notify[char.uuid][1]
+        if self.stray is not None:
+            notify(char, bytearray(self.stray))
+            self.stray = None
+        answered = json.loads(reply).get("id") if channel is Channel.COMMAND else None
+        if answered in self.delay:
+            asyncio.get_running_loop().call_later(
+                self.delay[answered], notify, char, bytearray(reply)
+            )
+            return
+        notify(char, bytearray(reply))
 
     # -- protocol -------------------------------------------------------------
 
@@ -190,6 +217,20 @@ async def test_poll_before_connecting_is_refused(charger):
         await link.poll()
 
 
+async def test_a_failed_subscribe_that_kept_its_callback_still_works(charger):
+    """CoreBluetooth: start_notify raises on the missing CCCD, yet notifications arrive."""
+    charger.cccd_fails_keeping = True
+    link = await _connected()
+    data = await link.poll()
+    assert data["chargerOpMode"] == 3
+
+
+async def test_a_failed_subscribe_with_no_callback_left_fails_at_connect(charger):
+    charger.cccd_fails_keeping = False
+    with pytest.raises(EaseeConnectionError, match="could not subscribe to notifications"):
+        await _connected()
+
+
 async def test_an_unsubscribed_channel_fails_fast(charger):
     """Rather than writing successfully and waiting out the reply timeout."""
     link = await _connected()
@@ -233,6 +274,33 @@ async def test_a_refusal_is_raised_with_its_reason(charger):
     link = await _connected()
     with pytest.raises(EaseeCommandRefused, match="command 999 not supported"):
         await link.perform(lambda s: s.command(999, [(1, 1)]))
+
+
+async def test_a_self_test_gets_the_long_timeout(charger, monkeypatch):
+    """It answers only when done, which on a real charger took minutes."""
+    link = await _connected()
+    monkeypatch.setattr(client_module, "REPLY_TIMEOUT", 0.05)
+    monkeypatch.setattr(client_module, "SLOW_REPLY_TIMEOUT", 1.0)
+    charger.delay = {16: 0.2, 40: 0.2}
+    assert (await link.perform(lambda s: s.run_self_test()))["code"] == 1
+    with pytest.raises(EaseeConnectionError, match="likely still busy"):
+        await link.perform(lambda s: s.set_led_brightness(75))
+
+
+async def test_a_late_reply_to_an_earlier_command_is_skipped(charger):
+    link = await _connected()
+    charger.stray = b'{"id":16,"code":0,"res":{"nws":3}}'
+    reply = await link.perform(lambda s: s.set_led_brightness(75))
+    assert reply["id"] == 40
+
+
+async def test_a_bleak_error_at_connect_is_an_easee_error(monkeypatch):
+    async def establish_connection(*_args, **_kwargs):
+        raise BleakError("failed to connect: Error Domain=CBErrorDomain Code=14")
+
+    monkeypatch.setattr(client_module, "establish_connection", establish_connection)
+    with pytest.raises(EaseeConnectionError, match="remove the charger"):
+        await EaseeCharger(object(), pin=PIN, serial=SERIAL).connect()
 
 
 # -- teardown -----------------------------------------------------------------

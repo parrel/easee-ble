@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
@@ -10,8 +11,10 @@ from typing import Any
 from bleak import BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
+from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 
+from .commands import SLOW_COMMANDS
 from .const import (
     CONNECT_ATTEMPTS,
     CONNECT_TIMEOUT,
@@ -21,6 +24,7 @@ from .const import (
     PAIR_TIMEOUT,
     REPLY_TIMEOUT,
     SETUP_TIMEOUT,
+    SLOW_REPLY_TIMEOUT,
     WRITE_ATTEMPTS,
     WRITE_RETRY_DELAY,
     WRITE_TIMEOUT,
@@ -49,6 +53,15 @@ _POLL_REQUESTS: dict[Channel, Callable[[Session], Request]] = {
 
 # Changing this changes the keys every caller gets back: a break, not a default tweak.
 DEFAULT_POLL_CHANNELS: tuple[Channel, ...] = (Channel.CONFIG, Channel.STATE)
+
+
+def _reply_id(data: bytes) -> int | None:
+    """The command id a COMMAND reply answers, or None if it does not say."""
+    try:
+        answered = json.loads(data).get("id")
+        return int(answered) if answered is not None else None
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 class EaseeCharger:
@@ -90,6 +103,10 @@ class EaseeCharger:
         self._link_lost_event = asyncio.Event()
         # Unsubscribe callbacks from that path, released on disconnect.
         self._notify_cancels: list[Callable[[], None]] = []
+        # Channels a request is waiting on; a notification anywhere else was not asked for.
+        self._waiting: set[Channel] = set()
+        # Channels that have answered on this connection, so a timeout can tell busy from deaf.
+        self._answered: set[Channel] = set()
         # Unnamed fields from the last poll, keyed "<CHANNEL>#<field number>".
         self.unknown: dict[str, Any] = {}
 
@@ -132,8 +149,16 @@ class EaseeCharger:
             raise EaseeConnectionError(
                 f"charger {self._serial}: could not establish a link within {LINK_TIMEOUT:.0f}s"
             ) from exc
+        except BleakError as exc:
+            # CoreBluetooth error 14: this adapter kept pairing keys the charger has since dropped.
+            stale = "Code=14" in str(exc) or "removed pairing" in str(exc)
+            hint = "; remove the charger from this computer's Bluetooth devices" if stale else ""
+            raise EaseeConnectionError(
+                f"charger {self._serial}: could not connect: {exc}{hint}"
+            ) from exc
         self._client = client
         self._queues = {c: asyncio.Queue() for c in Channel}
+        self._answered = set()
         try:
             async with asyncio.timeout(SETUP_TIMEOUT):
                 await self._resolve_and_authenticate(client)
@@ -190,13 +215,16 @@ class EaseeCharger:
                     self._notify_ok[channel] = True
                 except Exception as exc:
                     # This firmware exposes no CCCD yet notifies anyway; subscribe out-of-band.
-                    subscribed = await self._subscribe_without_cccd(client, char, channel)
+                    kept = self._callback_kept(client, char)
+                    subscribed = kept or await self._subscribe_without_cccd(client, char, channel)
                     self._notify_ok[channel] = subscribed
                     _LOGGER.debug(
-                        "start_notify(%s) failed (%s); CCCD-less subscribe: %s",
+                        "start_notify(%s) failed (%s); %s",
                         char.uuid,
                         exc,
-                        "ok" if subscribed else "unavailable",
+                        "the callback stayed registered"
+                        if kept
+                        else f"CCCD-less subscribe: {'ok' if subscribed else 'unavailable'}",
                     )
 
         if self._chars and not any(self._notify_ok.values()):
@@ -217,6 +245,13 @@ class EaseeCharger:
                 f"(cache cleared) - retrying"
             )
         await self._authenticate()
+
+    @staticmethod
+    def _callback_kept(client: BleakClient, char: BleakGATTCharacteristic) -> bool:
+        """Whether a failed start_notify left its callback registered, as CoreBluetooth's does."""
+        delegate = getattr(getattr(client, "_backend", None), "_delegate", None)
+        callbacks = getattr(delegate, "_characteristic_notify_callbacks", None)
+        return isinstance(callbacks, dict) and char.handle in callbacks
 
     async def _subscribe_without_cccd(
         self, client: BleakClient, char: BleakGATTCharacteristic, channel: Channel
@@ -254,7 +289,21 @@ class EaseeCharger:
         if channel is None:
             _LOGGER.debug("notification on unmapped handle %s", handle)
             return
-        self._queues[channel].put_nowait(bytes(data))
+        self._deliver(channel, bytes(data))
+
+    def _deliver(self, channel: Channel, data: bytes) -> None:
+        """Queue a notification for whoever waits on its channel, and log one nobody asked for."""
+        if channel not in self._waiting:
+            # COMMAND replies are plaintext JSON, so show them; frames are just counted.
+            shown = data[:300].decode("utf-8", "replace") if channel is Channel.COMMAND else ""
+            _LOGGER.debug(
+                "charger %s: unrequested %s notification (%d bytes) %s",
+                self._serial,
+                channel.name,
+                len(data),
+                shown,
+            )
+        self._queues[channel].put_nowait(data)
 
     @staticmethod
     async def _negotiated_mtu(client: BleakClient) -> int | None:
@@ -350,7 +399,7 @@ class EaseeCharger:
         if channel is None:
             _LOGGER.debug("notification on unknown characteristic %s", uuid)
             return
-        self._queues[channel].put_nowait(bytes(data))
+        self._deliver(channel, bytes(data))
 
     async def _write_with_retry(self, char: BleakGATTCharacteristic, request: Request) -> None:
         """Write, retrying a transient GATT failure on the same connection."""
@@ -421,41 +470,82 @@ class EaseeCharger:
         char = self._chars.get(request.channel)
         if char is None:
             raise EaseeConnectionError(f"channel {request.channel.name} not available")
+        timeout = SLOW_REPLY_TIMEOUT if request.command_id in SLOW_COMMANDS else REPLY_TIMEOUT
+        # Registered before the write, since the reply can beat the write's own completion.
+        self._waiting.add(request.channel)
         try:
-            await self._write_with_retry(char, request)
-        except Exception as exc:
-            # ATT error 5 is the charger refusing an unencrypted link; the raw message is opaque.
-            if "authentication" in str(exc).lower() or "not paired" in str(exc).lower():
-                why = f" ({self._bond_note})" if self._bond_note else ""
-                raise EaseeConnectionError(
-                    f"charger {self._serial} refused the write: the link must be "
-                    f"bonded first{why}. Pair the charger with this Bluetooth "
-                    f"adapter, or use an adapter that supports pairing. [{exc}]"
-                ) from exc
-            raise
+            try:
+                await self._write_with_retry(char, request)
+            except Exception as exc:
+                # ATT error 5: the charger refusing an unencrypted link; the raw message is opaque.
+                if "authentication" in str(exc).lower() or "not paired" in str(exc).lower():
+                    why = f" ({self._bond_note})" if self._bond_note else ""
+                    raise EaseeConnectionError(
+                        f"charger {self._serial} refused the write: the link must be "
+                        f"bonded first{why}. Pair the charger with this Bluetooth "
+                        f"adapter, or use an adapter that supports pairing. [{exc}]"
+                    ) from exc
+                raise
 
-        # The charger pushes a notification on the channel written to; there is no other path.
-        try:
-            return await self._wait_for_reply(queue, request.channel)
-        except TimeoutError as exc:
-            raise EaseeConnectionError(
-                f"charger {self._serial}: wrote {len(request.data)} bytes to "
-                f"{request.channel.name} but got no reply within "
-                f"{REPLY_TIMEOUT:.0f}s. notifications="
-                f"{'on' if self._notify_ok.get(request.channel) else 'OFF'}. "
-                f"This charger exposes no CCCD descriptor, so notifications are "
-                f"subscribed to out-of-band (see _subscribe_without_cccd); if "
-                f"that failed there is no path for a reply at all"
-            ) from exc
+            # The charger pushes a notification on the channel written to; there is no other path.
+            try:
+                reply = await self._wait_for_reply(queue, request, timeout)
+            except TimeoutError as exc:
+                raise EaseeConnectionError(self._no_reply(request, timeout)) from exc
+        finally:
+            self._waiting.discard(request.channel)
+        self._answered.add(request.channel)
+        return reply
 
-    async def _wait_for_reply(self, queue: asyncio.Queue[bytes], channel: Channel) -> bytes:
-        """Wait for the reply, giving up as soon as the link is known to be gone."""
+    def _no_reply(self, request: Request, timeout: float) -> str:
+        """Why a write went unanswered, as far as this connection can tell."""
+        head = (
+            f"charger {self._serial}: wrote {len(request.data)} bytes to "
+            f"{request.channel.name} but got no reply within {timeout:g}s"
+        )
+        if request.channel in self._answered:
+            # This channel has answered before, so its reply path works.
+            return f"{head}; it answered earlier requests, so the charger is likely still busy"
+        return (
+            f"{head}. notifications="
+            f"{'on' if self._notify_ok.get(request.channel) else 'OFF'}. "
+            f"This charger exposes no CCCD descriptor, so notifications are "
+            f"subscribed to out-of-band (see _subscribe_without_cccd); if "
+            f"that failed there is no path for a reply at all"
+        )
+
+    async def _wait_for_reply(
+        self, queue: asyncio.Queue[bytes], request: Request, timeout: float
+    ) -> bytes:
+        """Wait for the reply to this request, giving up as soon as the link is known to be gone."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            data = await self._next_reply(queue, request.channel, deadline - loop.time())
+            answered = _reply_id(data) if request.command_id is not None else None
+            if answered is None or answered == request.command_id:
+                return data
+            # A late answer to an earlier command, e.g. a self test that outlasted its wait.
+            _LOGGER.debug(
+                "charger %s: skipping a late reply to command %s while waiting for %s: %s",
+                self._serial,
+                answered,
+                request.command_id,
+                data[:300].decode("utf-8", "replace"),
+            )
+
+    async def _next_reply(
+        self, queue: asyncio.Queue[bytes], channel: Channel, timeout: float
+    ) -> bytes:
+        """The next notification on a channel, or an error the moment the link drops."""
+        if timeout <= 0:
+            raise TimeoutError
         reply = asyncio.ensure_future(queue.get())
         dropped = asyncio.ensure_future(self._link_lost_event.wait())
         try:
             done, _ = await asyncio.wait(
                 (reply, dropped),
-                timeout=REPLY_TIMEOUT,
+                timeout=timeout,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             # A reply that did arrive wins, even if the link died in the same pass.

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 # How long to wait for the charger's notification answering a write.
 REPLY_TIMEOUT = 15.0
+# The same, for commands answered only once they finish; a self test ran about four minutes.
+SLOW_REPLY_TIMEOUT = 300.0
 # How long to wait for the whole connect.
 CONNECT_TIMEOUT = 30.0
 # Ceiling for establishing the link, across all connection attempts.

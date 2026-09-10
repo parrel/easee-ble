@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,6 +27,8 @@ class Request:
 
     channel: Channel
     data: bytes
+    # The COMMAND id, which the charger echoes as the reply's "id"; None on other channels.
+    command_id: int | None = None
 
 
 class Session:
@@ -72,7 +75,8 @@ class Session:
         if self.session_key is None:
             raise SessionError("handshake not complete")
         frame = crypto.encrypt(self.session_key, plaintext, rng=self._rng)
-        return Request(channel, frame.hex().encode("ascii"))
+        command_id = json.loads(plaintext)["Id"] if channel is Channel.COMMAND else None
+        return Request(channel, frame.hex().encode("ascii"), command_id)
 
     def poll_state(self, uid: int | None = None) -> Request:
         """Request a State frame (electrical readings, dynamic current, ...)."""
@@ -98,9 +102,63 @@ class Session:
         """Issue an arbitrary COMMAND-channel write (see :mod:`easee_ble.commands`)."""
         return self._encrypted(Channel.COMMAND, commands.write_request(command_id, arguments))
 
-    def set_led_brightness(self, percent: int) -> Request:
-        """Set the LED strip brightness, 0-100."""
-        return self._encrypted(Channel.COMMAND, commands.set_led_brightness(percent))
+    # -- actions
+
+    def reboot(self) -> Request:
+        """Restart the charger."""
+        return self._encrypted(Channel.COMMAND, commands.reboot())
+
+    def play_lights(self) -> Request:
+        """Run the LED animation the app plays on every connection."""
+        return self._encrypted(Channel.COMMAND, commands.play_lights())
+
+    def run_self_test(self) -> Request:
+        """Run the charger's self test."""
+        return self._encrypted(Channel.COMMAND, commands.run_self_test())
+
+    def factory_reset(self) -> Request:
+        """Reset the charger to factory settings."""
+        return self._encrypted(Channel.COMMAND, commands.factory_reset())
+
+    # -- access and RFID keys
+
+    def authorize_charging(self, token: str) -> Request:
+        """Authorise charging with a key token."""
+        return self._encrypted(Channel.COMMAND, commands.authorize_charging(token))
+
+    def deauthorize_charging(self, token: str) -> Request:
+        """Withdraw a key token's authorisation to charge."""
+        return self._encrypted(Channel.COMMAND, commands.deauthorize_charging(token))
+
+    def set_rfid_pairing_mode(self, timeout: int = 60) -> Request:
+        """Wait ``timeout`` seconds for a tag to be scanned."""
+        return self._encrypted(Channel.COMMAND, commands.set_rfid_pairing_mode(timeout))
+
+    def set_local_authorization(self, required: bool) -> Request:
+        """Require a key before charging starts."""
+        return self._encrypted(Channel.COMMAND, commands.set_local_authorization(required))
+
+    def list_local_rfids(self) -> Request:
+        """List the names of the keys enrolled on the charger."""
+        return self._encrypted(Channel.COMMAND, commands.list_local_rfids())
+
+    def get_local_rfid(self, name: str) -> Request:
+        """Look up one enrolled key by name."""
+        return self._encrypted(Channel.COMMAND, commands.get_local_rfid(name))
+
+    def add_local_rfid(self, name: str, token: str) -> Request:
+        """Enrol a key under a name."""
+        return self._encrypted(Channel.COMMAND, commands.add_local_rfid(name, token))
+
+    def remove_local_rfid(self, token: str) -> Request:
+        """Remove the key with this token."""
+        return self._encrypted(Channel.COMMAND, commands.remove_local_rfid(token))
+
+    def clear_local_rfids(self) -> Request:
+        """Remove every enrolled key."""
+        return self._encrypted(Channel.COMMAND, commands.clear_local_rfids())
+
+    # -- currents
 
     def set_max_charger_current(self, amperes: int) -> Request:
         """Set the charger's maximum current, in whole amperes."""
@@ -110,55 +168,83 @@ class Session:
         """Set the dynamic (temporary) charger current, in whole amperes."""
         return self._encrypted(Channel.COMMAND, commands.set_dynamic_charger_current(amperes))
 
-    def set_phase_mode(self, mode: commands.PhaseMode) -> Request:
-        """Set the charging-phase mode (see :class:`easee_ble.commands.PhaseMode`)."""
-        return self._encrypted(Channel.COMMAND, commands.set_phase_mode(mode))
+    def pause_charging(self) -> Request:
+        """Pause charging by setting the dynamic current to 0 A."""
+        return self._encrypted(Channel.COMMAND, commands.pause_charging())
+
+    def resume_charging(self, amperes: int) -> Request:
+        """Resume charging by restoring a dynamic current."""
+        return self._encrypted(Channel.COMMAND, commands.resume_charging(amperes))
+
+    def set_circuit_rated_current(
+        self, p1: int, p2: int | None = None, p3: int | None = None
+    ) -> Request:
+        """Set the circuit's rated current (the fuse): one value for all phases, or three."""
+        return self._encrypted(Channel.COMMAND, commands.set_circuit_rated_current(p1, p2, p3))
+
+    def set_max_circuit_current(
+        self, p1: int, p2: int | None = None, p3: int | None = None
+    ) -> Request:
+        """Set the circuit's maximum current: one value for all phases, or three."""
+        return self._encrypted(Channel.COMMAND, commands.set_max_circuit_current(p1, p2, p3))
+
+    def set_dynamic_circuit_current(
+        self, p1: int, p2: int | None = None, p3: int | None = None
+    ) -> Request:
+        """Set the circuit's dynamic current: one value for all phases, or three."""
+        return self._encrypted(Channel.COMMAND, commands.set_dynamic_circuit_current(p1, p2, p3))
+
+    def set_fallback_circuit_current(
+        self, p1: int, p2: int | None = None, p3: int | None = None
+    ) -> Request:
+        """Set the circuit's fallback current: one value for all phases, or three."""
+        return self._encrypted(Channel.COMMAND, commands.set_fallback_circuit_current(p1, p2, p3))
+
+    def set_idle_current(self, enabled: bool) -> Request:
+        """Keep a trickle of current flowing to a parked car."""
+        return self._encrypted(Channel.COMMAND, commands.set_idle_current(enabled))
+
+    # -- settings
 
     def set_charger_enabled(self, enabled: bool) -> Request:
         """Switch the charger on or off (Easee's ``isEnabled``, Config field 1)."""
         return self._encrypted(Channel.COMMAND, commands.set_charger_enabled(enabled))
 
-    def set_access_control(self, enabled: bool) -> Request:
-        """Deprecated misnomer for :meth:`set_charger_enabled`."""
-        return self.set_charger_enabled(enabled)
+    def set_phase_mode(self, mode: commands.PhaseMode) -> Request:
+        """Set the charging-phase mode (see :class:`easee_ble.commands.PhaseMode`)."""
+        return self._encrypted(Channel.COMMAND, commands.set_phase_mode(mode))
 
-    def set_bt_enable_mode(self, mode: commands.BtEnableMode) -> Request:
-        """Set how the charger's Bluetooth radio behaves."""
-        return self._encrypted(Channel.COMMAND, commands.set_bt_enable_mode(mode))
+    def set_led_brightness(self, percent: int) -> Request:
+        """Set the LED strip brightness, 0-100."""
+        return self._encrypted(Channel.COMMAND, commands.set_led_brightness(percent))
 
     def set_cable_locked(self, locked: bool) -> Request:
         """Lock or unlock the charging cable in the socket."""
         return self._encrypted(Channel.COMMAND, commands.set_cable_locked(locked))
 
-    def open_session(self) -> Request:
-        """Send the command the official app sends first on every connection."""
-        return self._encrypted(Channel.COMMAND, commands.open_session())
+    def set_bt_enable_mode(self, mode: commands.BtEnableMode) -> Request:
+        """Set how the charger's Bluetooth radio behaves."""
+        return self._encrypted(Channel.COMMAND, commands.set_bt_enable_mode(mode))
 
-    def list_user_tokens(self) -> Request:
-        """List enrolled RFID / account keys."""
-        return self._encrypted(Channel.COMMAND, commands.list_user_tokens())
+    # -- wifi
 
-    def get_user_token(self, slot: int, name: str) -> Request:
-        """Look up one enrolled key by slot and name."""
-        return self._encrypted(Channel.COMMAND, commands.get_user_token(slot, name))
+    def scan_wifi(self, limit: int = 10) -> Request:
+        """Scan for WiFi networks; the reply lists them."""
+        return self._encrypted(Channel.COMMAND, commands.scan_wifi(limit))
 
-    def set_user_token(self, slot: int, name: str, token: str) -> Request:
-        """Enrol or update a key in a slot."""
-        return self._encrypted(Channel.COMMAND, commands.set_user_token(slot, name, token))
+    def set_wifi(self, ssid: str, passphrase: str) -> Request:
+        """Set the WiFi credentials, or clear them with two empty strings."""
+        return self._encrypted(Channel.COMMAND, commands.set_wifi(ssid, passphrase))
 
-    def set_circuit_max_current(
-        self, p1: int, p2: int | None = None, p3: int | None = None
-    ) -> Request:
-        """Set the circuit current limit: one value for all phases, or three."""
-        return self._encrypted(Channel.COMMAND, commands.set_circuit_max_current(p1, p2, p3))
+    # -- MID meter
 
-    def set_offline_max_circuit_current(
-        self, p1: int, p2: int | None = None, p3: int | None = None
-    ) -> Request:
-        """Set the per-phase limit used while the charger is offline."""
-        return self._encrypted(
-            Channel.COMMAND, commands.set_offline_max_circuit_current(p1, p2, p3)
-        )
+    def get_mid_public_key(self) -> Request:
+        """Read the MID meter's public key."""
+        return self._encrypted(Channel.COMMAND, commands.get_mid_public_key())
+
+    def display_mid_public_key(self) -> Request:
+        """Show the MID meter's public key on the charger's display."""
+        return self._encrypted(Channel.COMMAND, commands.display_mid_public_key())
 
     # -- replies --------------------------------------------------------------
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from easee_ble import frames
@@ -328,3 +330,85 @@ def test_power_and_energy_units_are_kilo():
     assert frames.FIELD_UNITS["totalPower"] == "kW"
     assert frames.FIELD_UNITS["lifetimeEnergy"] == "kWh"
     assert frames.FIELD_UNITS["sessionEnergy"] == "kWh"
+
+
+def test_ocpp_enabled_present_while_ocpp_is_on():
+    """Config 15, captured while the charger's cloud OCPP switch read on."""
+    assert parse_response(CONFIG_BEFORE).named["ocppEnabled"] == 1
+
+
+def test_ocpp_enabled_reads_zero_when_the_charger_omits_it():
+    assert parse_response(_config(2, 75)).named["ocppEnabled"] == 0
+
+
+def test_energy_per_hour_is_reported_while_charging():
+    """State 20, absent from the idle frame and present in the charging one."""
+    assert parse_response(STATE_CHARGING).named["energyPerHour"] == pytest.approx(1.35, abs=1e-3)
+    assert parse_response(STATE_SAMPLE).named["energyPerHour"] == 0
+
+
+def test_line_voltages_rank_with_their_phase_voltages():
+    """36/37/38 are L1L2/L1L3/L2L3: each tracks the two phase voltages it spans."""
+    named = parse_response(STATE_CHARGING).named
+    assert named["voltageL1N"] > named["voltageL2N"] > named["voltageL3N"]
+    assert named["voltageL1L2"] > named["voltageL1L3"] > named["voltageL2L3"]
+
+
+def test_neutral_current_is_the_vector_sum_of_the_phases():
+    """Why 25 is the neutral: Kirchhoff over the unbalanced charging frame."""
+    import cmath
+    import math
+
+    named = parse_response(STATE_CHARGING).named
+    total = (
+        cmath.rect(named["currentL1"], 0)
+        + cmath.rect(named["currentL2"], math.radians(-120))
+        + cmath.rect(named["currentL3"], math.radians(120))
+    )
+    assert abs(total) == pytest.approx(named["currentN"], rel=0.05)
+
+
+def test_lifetime_hours_is_reported():
+    """State 4, an hour counter whose zero is the charger's commissioning."""
+    assert parse_response(STATE_SAMPLE).named["lifetimeHours"] == 45
+    assert parse_response(STATE_CHARGING).named["lifetimeHours"] == 56
+
+
+def test_fields_named_by_the_first_walk():
+    """State 14-16 carry command 22; Config 12 and 14 carry commands 34 and 33."""
+    state_body = bytes([0x75]) + struct.pack("<f", 14.0)
+    state = parse_response(
+        bytes([0, 0x41, 1, 1]) + (len(state_body) + 6).to_bytes(2, "big") + state_body
+    )
+    assert state.named["dynamicCircuitCurrentP1"] == 14.0
+    config_body = bytes([0x60, 1])
+    config = parse_response(
+        bytes([0, 0x40, 1, 1]) + (len(config_body) + 6).to_bytes(2, "big") + config_body
+    )
+    assert config.named["enableIdleCurrent"] == 1
+    # Absent means off, not unknown.
+    assert config.named["authorizationRequired"] == 0
+
+
+def test_wifi_networks_come_from_the_scan_acknowledgement():
+    """Captured from the app: the networks ride in res, not in Comment."""
+    reply = {
+        "id": 7,
+        "code": 1,
+        "res": {
+            "nws": 3,
+            "networks": [{"ssid": "Home", "rssi": -64}, {"ssid": "Guest", "rssi": -70}],
+        },
+    }
+    assert [n["ssid"] for n in frames.wifi_networks(reply)] == ["Home", "Guest"]
+    assert frames.wifi_networks({"id": 40, "code": 1, "res": {"nws": 3}}) == []
+
+
+def test_led_mode_is_the_apps_enum():
+    """Four values seen on a real charger land on the names the app gives them."""
+    assert frames.led_mode(18) is frames.LedMode.IDLE_MASTER
+    assert frames.led_mode(39) is frames.LedMode.SELF_TEST4
+    assert frames.led_mode(46) is frames.LedMode.BLUETOOTH_CONNECTED
+    assert frames.led_mode(29) is frames.LedMode.PAIRING_WITH_RFID
+    assert frames.led_mode(99) is None
+    assert len(frames.LedMode) == 48

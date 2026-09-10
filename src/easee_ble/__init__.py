@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from . import commands, crypto, frames, protocol
 from .client import DEFAULT_CHANNELS, DEFAULT_POLL_CHANNELS, EaseeCharger
-from .commands import BtEnableMode, Command, NetworkStatus, PhaseMode, network_status
+from .commands import (
+    BtEnableMode,
+    Command,
+    NetworkStatus,
+    PhaseMode,
+    network_status,
+)
 from .const import HANDSHAKE_MTU
 from .crypto import decrypt, encrypt
 from .exceptions import (
@@ -19,7 +25,6 @@ from .exceptions import (
     SessionError,
 )
 from .frames import (
-    CONFIRMED_REASON_CODES,
     FIELD_ALIASES,
     FIELD_UNITS,
     REASON_FOR_NO_CURRENT,
@@ -27,16 +32,19 @@ from .frames import (
     ZERO_WHEN_ABSENT,
     ChargerOpMode,
     Frame,
+    LedMode,
     MessageType,
     charger_op_mode,
     command_accepted,
     command_payload,
     command_refusal,
     declared_length,
+    led_mode,
     parse_command_response,
     parse_response,
     reason_for_no_current,
     reason_for_no_current_slug,
+    wifi_networks,
     with_aliases,
 )
 from .jpake import ECJPake
@@ -63,9 +71,10 @@ __all__ = [
     "MessageType",
     "ChargerOpMode",
     "charger_op_mode",
+    "LedMode",
+    "led_mode",
     "REASON_FOR_NO_CURRENT",
     "REASON_FOR_NO_CURRENT_SLUGS",
-    "CONFIRMED_REASON_CODES",
     "FIELD_UNITS",
     "reason_for_no_current",
     "reason_for_no_current_slug",
@@ -78,6 +87,7 @@ __all__ = [
     "parse_command_response",
     "command_accepted",
     "command_payload",
+    "wifi_networks",
     "command_refusal",
     # transport constants worth knowing about
     "SERVICE_UUID",

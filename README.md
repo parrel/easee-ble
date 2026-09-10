@@ -91,25 +91,41 @@ answer:
 await charger.perform(lambda s: s.set_charger_enabled(True))
 await charger.perform(lambda s: s.set_max_charger_current(16))
 await charger.perform(lambda s: s.set_dynamic_charger_current(10))
-await charger.perform(lambda s: s.set_circuit_max_current(20))          # or (p1, p2, p3)
-await charger.perform(lambda s: s.set_offline_max_circuit_current(10))
+await charger.perform(lambda s: s.set_circuit_rated_current(16))        # the fuse; or (p1, p2, p3)
+await charger.perform(lambda s: s.set_max_circuit_current(25))
 await charger.perform(lambda s: s.set_phase_mode(PhaseMode.LOCKED_3_PHASE))
 await charger.perform(lambda s: s.set_led_brightness(75))               # 0-100
 await charger.perform(lambda s: s.set_cable_locked(True))
-await charger.perform(lambda s: s.set_access_control(True))
+await charger.perform(lambda s: s.pause_charging())
+await charger.perform(lambda s: s.resume_charging(16))
 ```
+
 
 `PhaseMode` is `LOCKED_1_PHASE`, `AUTO` or `LOCKED_3_PHASE`.
 
-### RFID / account keys
+### RFID keys
 
 ```python
 from easee_ble import command_payload
 
-reply = await charger.perform(lambda s: s.list_user_tokens())
-keys = command_payload(reply)
-await charger.perform(lambda s: s.get_user_token(slot, name))
-await charger.perform(lambda s: s.set_user_token(slot, name, token))
+reply = await charger.perform(lambda s: s.list_local_rfids())
+names = command_payload(reply)["utns"]
+await charger.perform(lambda s: s.add_local_rfid("Alice", "04a1b2c3d4e5f6"))  # the tag's UID
+await charger.perform(lambda s: s.remove_local_rfid("04a1b2c3d4e5f6"))
+await charger.perform(lambda s: s.set_local_authorization(True))   # charging needs a key
+```
+
+Pairing mode (`set_rfid_pairing_mode()`) hands a scanned tag to your Easee
+account in the cloud, not to the charger's own list.
+
+### WiFi
+
+```python
+from easee_ble import wifi_networks
+
+reply = await charger.perform(lambda s: s.scan_wifi())
+wifi_networks(reply)                  # [{'ssid': 'Home', 'rssi': -64}, ...]
+await charger.perform(lambda s: s.set_wifi("Home", "passphrase"))
 ```
 
 ### Other reads

@@ -11,7 +11,6 @@ from easee_ble import frames
 from easee_ble.client import _POLL_REQUESTS, DEFAULT_POLL_CHANNELS
 from easee_ble.exceptions import FrameError, IncompleteFrame
 from easee_ble.frames import (
-    CONFIRMED_REASON_CODES,
     FIELD_ALIASES,
     FIELD_NAMES,
     FIELD_UNITS,
@@ -93,10 +92,6 @@ def test_reason_slugs_cover_the_same_codes_as_the_descriptions():
     slugs = list(REASON_FOR_NO_CURRENT_SLUGS.values())
     assert len(slugs) == len(set(slugs)), "two reason codes share a slug"
     assert all(s == s.lower() and s.isidentifier() for s in slugs)
-
-
-def test_confirmed_reason_codes_are_in_the_table():
-    assert set(REASON_FOR_NO_CURRENT) >= CONFIRMED_REASON_CODES
 
 
 def test_unknown_codes_never_raise():
