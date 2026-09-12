@@ -2,6 +2,10 @@
 
 Notable changes per release. Versions follow [SemVer](https://semver.org).
 
+## 1.0.0 - 2026-09-12
+
+The API is now stable
+
 ## 0.2.0 - 2026-09-10
 
 Breaking: commands now carry the Easee app's own names, and all but three are confirmed on a real charger.
