@@ -1,5 +1,7 @@
 # easee-ble
 
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2.svg)](https://github.com/sponsors/parrel)
+
 Local **Bluetooth** control for [Easee](https://easee.com) EV chargers. Talk to the charger directly with the PIN printed on the unit.
 
 ```bash
